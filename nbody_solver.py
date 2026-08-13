@@ -1,4 +1,4 @@
-"""N-body gravitational simulation: Barnes-Hut tree + adaptive RK4.
+"""Barnes-Hut N-body simulation with adaptive RK4 integration.
 
 Final project, 77315 Computational Physics.
 Eran Rehani, 2026.
@@ -32,7 +32,7 @@ except ImportError:
     _HAVE_NUMBA = False
 
 
-# Everything below is in kpc, M_sun and Gyr.
+# Units: kpc, M_sun and Gyr.
 G = 4.4996e-6  # kpc^3 M_sun^-1 Gyr^-2
 M_TOT = 1.0e11  # M_sun
 R_SPHERE = 50.0  # kpc
@@ -53,7 +53,7 @@ os.makedirs(FIG_DIR, exist_ok=True)
 
 # Initial conditions
 def rand_dir(n, rng):
-    """Return n isotropically distributed unit vectors."""
+    """Return n isotropic unit vectors."""
     u = rng.random(n)
     cos_t = 2.0 * u - 1.0
     sin_t = np.sqrt(np.maximum(0.0, 1.0 - cos_t * cos_t))
@@ -62,6 +62,16 @@ def rand_dir(n, rng):
                             sin_t * np.sin(phi),
                             cos_t])
 
+
+def _sample_uniform_sphere(N, rng):
+    """Return uniformly distributed positions and equal particle masses."""
+    u = rng.random(N)
+    r = R_SPHERE * u ** (1.0 / 3.0)
+    pos = r[:, None] * rand_dir(N, rng)
+    m = np.full(N, M_TOT / N)
+    return pos, m
+
+
 def init_conditions(N, V_kms, seed=SEED, rng=None):
     """Sample a uniform sphere and Maxwell-Boltzmann velocities.
 
@@ -69,18 +79,14 @@ def init_conditions(N, V_kms, seed=SEED, rng=None):
     """
     if rng is None:
         rng = np.random.default_rng(seed)
-    # Uniform volume density requires r = R * u^(1/3).
-    u = rng.random(N)
-    r = R_SPHERE * u ** (1.0 / 3.0)
-    pos = r[:, None] * rand_dir(N, rng)
+    pos, m = _sample_uniform_sphere(N, rng)
     # Each velocity component has sigma = V / sqrt(3).
     V = V_kms / KM_PER_KPC_GYR
     sigma = V / math.sqrt(3.0)
     vel = rng.normal(0.0, sigma, size=(N, 3))
-    # Remove only bulk velocity. Translating the sampled positions would move
-    # some particles outside the specified sphere centred on the box origin.
+    # Remove the sampled bulk velocity. Recentering the positions could move
+    # particles outside the specified sphere around the box origin.
     vel -= vel.mean(axis=0)
-    m = np.full(N, M_TOT / N)
     return pos, vel, m
 
 
@@ -141,9 +147,9 @@ def _build_subtree(cell, pos, mass, idx):
            2 * (py > cy).astype(int) +
            4 * (pz > cz).astype(int))
     if (key == key[0]).all():
-        # A close pair can remain in one octant through several levels. Exactly
-        # coincident points never separate, so store them as one childless cell.
-        # Their mutual force is zero and an external target sees their total mass.
+        # Close particles may share an octant for several levels. Identical
+        # positions never separate, so keep them in one childless cell. Their
+        # mutual force is zero; external targets see their combined mass.
         if float((pos[idx].max(axis=0) - pos[idx].min(axis=0)).max()) == 0.0:
             cell.children = []
             return
@@ -170,22 +176,38 @@ def _particle_in_cell(ri, cell):
             abs(ri[2] - cell.cz) <= cell.half + 1e-9)
 
 
+def compute_tree_acc_potential(pos, m, theta=THETA, S=S_SOFT, Gval=G):
+    """Return acceleration and potential per unit mass from one tree."""
+    N = len(m)
+    root = build_tree(pos, m)
+    acc = np.zeros((N, 3))
+    pot = np.zeros(N)
+    for i in range(N):
+        a = np.zeros(3)
+        ph = [0.0]
+        _walk_acc(root, pos[i], theta, S, Gval, m, pos, a)
+        _walk_pot(root, pos[i], theta, S, Gval, m, pos, ph)
+        acc[i] = a
+        pot[i] = ph[0]
+    return acc, pot
+
+
 def compute_tree_acc(pos, m, theta=THETA, S=S_SOFT, Gval=G):
     """Return accelerations, using the Numba walk when available."""
     root = build_tree(pos, m)
     if _HAVE_NUMBA:
-        flat = flatten_tree(root, len(m))
+        flat = flatten_tree(root)
         return _compute_tree_acc_jit(pos, m, theta, S, Gval, *flat)
     N = len(m)
     acc = np.zeros((N, 3))
     for i in range(N):
         a = np.zeros(3)
-        _walk_acc(root, pos[i], m[i], theta, S, Gval, m, pos, a)
+        _walk_acc(root, pos[i], theta, S, Gval, m, pos, a)
         acc[i] = a
     return acc
 
 
-def _walk_acc(cell, ri, mi, theta, S, G, m_arr, pos, acc):
+def _walk_acc(cell, ri, theta, S, G, m_arr, pos, acc):
     if cell is None or cell.count == 0:
         return
     if cell.count == 1:
@@ -207,7 +229,7 @@ def _walk_acc(cell, ri, mi, theta, S, G, m_arr, pos, acc):
         return
     if _particle_in_cell(ri, cell):
         for ch in cell.children:
-            _walk_acc(ch, ri, mi, theta, S, G, m_arr, pos, acc)
+            _walk_acc(ch, ri, theta, S, G, m_arr, pos, acc)
         return
     dx = ri[0] - cell.comx
     dy = ri[1] - cell.comy
@@ -215,7 +237,7 @@ def _walk_acc(cell, ri, mi, theta, S, G, m_arr, pos, acc):
     D = math.sqrt(dx * dx + dy * dy + dz * dz)
     if D / cell.diag < theta and cell.children:
         for ch in cell.children:
-            _walk_acc(ch, ri, mi, theta, S, G, m_arr, pos, acc)
+            _walk_acc(ch, ri, theta, S, G, m_arr, pos, acc)
     else:
         rsoft = D + S
         fac = -G * cell.mass / (rsoft * rsoft * D)
@@ -262,9 +284,10 @@ def nbody_rhs(t, y, N, m, theta, S, Gval):
     return dy
 
 
-def rk_step(f, t, y, h):
+def rk_step(f, t, y, h, k1=None):
     """Advance y by one fourth-order Runge-Kutta step."""
-    k1 = f(t, y)
+    if k1 is None:
+        k1 = f(t, y)
     k2 = f(t + h / 2.0, y + (h / 2.0) * k1)
     k3 = f(t + h / 2.0, y + (h / 2.0) * k2)
     k4 = f(t + h, y + h * k3)
@@ -272,14 +295,14 @@ def rk_step(f, t, y, h):
 
 
 def _grow_h(h, err, tol, h_max, order=4):
-    """Step size after an accepted step, capped at h_max."""
+    """Return the next accepted-step size, capped at h_max."""
     if err > 0:
         h *= min(2.0, 0.9 * (tol / err) ** (1.0 / (order + 1)))
     return min(h, h_max)
 
 
 def _shrink_h(h, err, tol, h_min, order=4):
-    """Step size after a rejected step; fail if h_min itself was too coarse."""
+    """Return a smaller step, or fail when h_min cannot meet the tolerance."""
     proposed_h = h * max(0.1, 0.9 * (tol / err) ** (1.0 / (order + 1)))
     if proposed_h < h_min:
         if h <= h_min * (1.0 + 1e-12):
@@ -324,8 +347,9 @@ def rk_adaptive_nbody(f, t0, y0, t_end, tol_pos, h_min=1e-4, h_max=2.0,
         h = min(h, t_end - t)
         if snap_idx < len(snapshot_times):
             h = min(h, snapshot_times[snap_idx] - t)
-        y_full = rk_step(f, t, y, h)
-        y_mid = rk_step(f, t, y, h / 2.0)
+        k1 = f(t, y)
+        y_full = rk_step(f, t, y, h, k1)
+        y_mid = rk_step(f, t, y, h / 2.0, k1)
         y_half = rk_step(f, t + h / 2.0, y_mid, h / 2.0)
         pos_delta = (y_half[:N3] - y_full[:N3]).reshape(-1, 3)
         err = np.linalg.norm(pos_delta, axis=1).max()
@@ -344,7 +368,7 @@ def rk_adaptive_nbody(f, t0, y0, t_end, tol_pos, h_min=1e-4, h_max=2.0,
         else:
             n_reject += 1
             h = _shrink_h(h, err, tol_pos, h_min, ORDER)
-    # Fill any requested endpoint that was within the integration tolerance.
+    # Store requested endpoints reached within the integration tolerance.
     while snap_idx < len(snapshot_times):
         snaps.append((snapshot_times[snap_idx], y[:N3].copy(), y[N3:].copy()))
         snap_idx += 1
@@ -361,14 +385,14 @@ def grav_energy_tree(pos, m, theta=THETA, S=S_SOFT, Gval=G):
     """Return Eg from the tree potential using the same opening angle."""
     root = build_tree(pos, m)
     if _HAVE_NUMBA:
-        flat = flatten_tree(root, len(m))
+        flat = flatten_tree(root)
         pot = _compute_tree_pot_jit(pos, m, theta, S, Gval, *flat)
     else:
         N = len(m)
         pot = np.zeros(N)
         for i in range(N):
             ph = [0.0]
-            _walk_pot(root, pos[i], m[i], theta, S, Gval, m, pos, ph)
+            _walk_pot(root, pos[i], theta, S, Gval, m, pos, ph)
             pot[i] = ph[0]
     return 0.5 * (m * pot).sum()
 
@@ -390,7 +414,7 @@ def grav_energy(pos, m, theta=THETA, S=S_SOFT, Gval=G):
     return grav_energy_tree(pos, m, theta, S, Gval)
 
 
-def _walk_pot(cell, ri, mi, theta, S, G, m_arr, pos, ph):
+def _walk_pot(cell, ri, theta, S, G, m_arr, pos, ph):
     if cell is None or cell.count == 0:
         return
     if cell.count == 1:
@@ -407,7 +431,7 @@ def _walk_pot(cell, ri, mi, theta, S, G, m_arr, pos, ph):
         return
     if _particle_in_cell(ri, cell):
         for ch in cell.children:
-            _walk_pot(ch, ri, mi, theta, S, G, m_arr, pos, ph)
+            _walk_pot(ch, ri, theta, S, G, m_arr, pos, ph)
         return
     dx = ri[0] - cell.comx
     dy = ri[1] - cell.comy
@@ -415,13 +439,13 @@ def _walk_pot(cell, ri, mi, theta, S, G, m_arr, pos, ph):
     D = math.sqrt(dx * dx + dy * dy + dz * dz)
     if D / cell.diag < theta and cell.children:
         for ch in cell.children:
-            _walk_pot(ch, ri, mi, theta, S, G, m_arr, pos, ph)
+            _walk_pot(ch, ri, theta, S, G, m_arr, pos, ph)
     else:
         ph[0] += -G * cell.mass / (D + S)
 
 
 # Flat tree representation used by the Numba hot loops
-def flatten_tree(root, N):
+def flatten_tree(root):
     """Return flat tree arrays for the Numba walks."""
     cells = []
 
@@ -438,8 +462,8 @@ def flatten_tree(root, N):
     def col(attr, dtype=float):
         return np.array([getattr(c, attr) for c in cells], dtype=dtype)
 
-    # Childless multi-particle cells contain coincident points. Mark them so the
-    # flat walk uses their combined mass instead of recursing into no children.
+    # Mark childless cells of coincident particles so the flat walk uses their
+    # combined mass instead of attempting to recurse.
     cell_lumped = np.array([c.count > 1 and not c.children for c in cells],
                            dtype=np.bool_)
     cell_children = np.full((nc, 8), -1, dtype=np.int64)
@@ -622,8 +646,8 @@ def density_profile(pos, m, n_bins=25, r_min=None, r_max=None, center=None):
     if r_max <= r_min:
         r_max = r_min * (1.0 + 1e-6)
     bins = np.logspace(np.log10(r_min), np.log10(r_max), n_bins + 1)
-    # Reconstructing a logarithmic endpoint can move it inward by one ULP.
-    # Expanding only the boundary edges keeps the occupied interval closed.
+    # Rounding can move a reconstructed logarithmic endpoint inward by one ULP.
+    # Expand the two boundary edges to keep the occupied interval closed.
     bins[0] = np.nextafter(bins[0], -np.inf)
     bins[-1] = np.nextafter(bins[-1], np.inf)
     vol = (4.0 / 3.0) * np.pi * (bins[1:] ** 3 - bins[:-1] ** 3)
@@ -659,10 +683,10 @@ def fit_king(r_centers, rho, rho_err, fix_alpha_beta=None):
         z = alpha * (np.log(r_) - log_r_c)
         return log_rho_c - beta * np.logaddexp(0.0, z)
 
-    # The peak and descending half-maximum give stable initial scale estimates.
+    # Estimate the initial scales from the peak and descending half-maximum.
     i_peak = int(np.argmax(y))
     rho_max = y[i_peak]
-    # Use the descending side of the profile for the half-maximum radius.
+    # Take the half-maximum radius from the descending side of the profile.
     if i_peak < len(y) - 1:
         tail = y[i_peak:]
         jh = int(np.argmin(np.abs(tail - rho_max / 2.0)))
@@ -724,11 +748,13 @@ def fit_king(r_centers, rho, rho_err, fix_alpha_beta=None):
 
 # Full simulation
 def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
-            snapshot_times=None, verbose=True,
+            snapshot_times=None, break_times=None, verbose=True,
             h_min=0.01, h_max=2.0):
     """Evolve one system and return its states and diagnostics."""
     if snapshot_times is None:
         snapshot_times = [0.0, 2.5, 5.0, 10.0, 15.0, t_end]
+    if break_times is None:
+        break_times = snapshot_times
     rng = np.random.default_rng(SEED)
     pos0, vel0, m = init_conditions(N, V_kms, rng=rng)
     N0 = N
@@ -755,8 +781,8 @@ def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
     esc_ek_sum = 0.0  # kinetic and potential energy carried off by escapers
     esc_eg_sum = 0.0
 
-    # Particle removal changes the state length, so the adaptive loop operates
-    # directly on the resizable arrays instead of calling rk_adaptive_nbody.
+    # Particle removal changes the state length. Run the adaptive loop on
+    # resizable arrays instead of calling rk_adaptive_nbody.
     t0 = time.time()
     t = 0.0
     h = t_end / 100.0
@@ -764,16 +790,14 @@ def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
     scale_r = 2 ** ORDER - 1
     snaps = {float(st): None for st in snapshot_times}
     if snaps:
-        # A non-empty request always includes the endpoints. Passing [] is an
-        # explicit request to retain no snapshots, useful for the V=65/95 runs
-        # that supply only their final density profiles.
+        # A non-empty request includes both endpoints. Passing [] stores no
+        # snapshots, as used by the density-only V=65 and V=95 runs.
         snaps.setdefault(0.0, None)
         snaps.setdefault(float(t_end), None)
         snaps[0.0] = (cur_pos.copy(), cur_vel.copy())
     snap_sorted = sorted(snaps)
-
-    def make_y():
-        return np.concatenate([cur_pos.ravel(), cur_vel.ravel()])
+    break_sorted = sorted({float(st) for st in break_times
+                           if 0.0 < float(st) <= t_end})
 
     def rhs_cur(t_, y_):
         Nc = len(cur_m)
@@ -784,21 +808,19 @@ def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
         dy[3 * Nc:] = a.ravel()
         return dy
 
-    y = make_y()
+    y = np.concatenate([cur_pos.ravel(), cur_vel.ravel()])
     n_steps = 0
     n_reject = 0
     while t < t_end - 1e-9:
         Nc = len(cur_m)
         N3 = 3 * Nc
         h = min(h, t_end - t)
-        pending_snapshots = [st for st in snap_sorted
-                             if snaps[st] is None and st > t + 1e-12]
-        if pending_snapshots:
-            h = min(h, pending_snapshots[0] - t)
-        # rhs_cur ignores its time argument, so the step doubling here is the
-        # same arithmetic as rk_adaptive_nbody performs through rk_step.
-        y_full = rk_step(rhs_cur, t, y, h)
-        y_mid = rk_step(rhs_cur, t, y, h / 2.0)
+        next_break = next((st for st in break_sorted if st > t + 1e-12), None)
+        if next_break is not None:
+            h = min(h, next_break - t)
+        k1 = rhs_cur(t, y)
+        y_full = rk_step(rhs_cur, t, y, h, k1)
+        y_mid = rk_step(rhs_cur, t, y, h / 2.0, k1)
         y_half = rk_step(rhs_cur, t + h / 2.0, y_mid, h / 2.0)
         pos_delta = (y_half[:N3] - y_full[:N3]).reshape(Nc, 3)
         err = np.linalg.norm(pos_delta, axis=1).max()
@@ -815,10 +837,9 @@ def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
                 idx_keep = ~out
                 n_esc = int(out.sum())
                 ek_esc = 0.5 * (cur_m[out] * (cur_vel[out] * cur_vel[out]).sum(axis=1)).sum()
-                # Split the chosen Eg estimator algebraically. Everything the
-                # removal takes out of the retained sum (escaper-escaper and
-                # escaper-retained terms) is credited to the escaper buffer.
-                # For production N this estimator is the approximate tree sum.
+                # Credit the removal-induced change in the chosen Eg estimator
+                # to the escaper buffer. This includes escaper-escaper and
+                # escaper-retained terms. Production runs use the tree estimate.
                 eg_all = grav_energy(cur_pos, cur_m)
                 cur_pos = cur_pos[idx_keep].copy()
                 cur_vel = cur_vel[idx_keep].copy()
@@ -845,7 +866,7 @@ def run_one(V_kms, N=N_MAIN, t_end=T_END, tol=TOL_RK,
         else:
             n_reject += 1
             h = _shrink_h(h, err, tol, h_min, ORDER)
-    # An empty snapshot request remains empty for the density-only runs.
+    # Keep empty snapshot requests empty for density-only runs.
     if snaps and snaps.get(float(t_end)) is None:
         snaps[float(t_end)] = (cur_pos.copy(), cur_vel.copy())
 
@@ -1012,8 +1033,8 @@ def plot_energy_drift(res, figpath):
     ax.set_ylabel(r"$(E(t)-E_0)/E_0$", fontsize=13)
     ax.set_title(f"Energy conservation  (V={res['V']} km/s)", fontsize=14)
     ax.grid(True, alpha=0.35)
-    # Individual escape markers overlap at this event count. The surviving
-    # population shows the same history without obscuring the energy curves.
+    # Individual escape markers would overlap and obscure the energy curves.
+    # The retained-particle count shows the same event history.
     if "n_log" in res and len(res["n_log"]) == len(t):
         ax2 = ax.twinx()
         ax2.plot(t, res["n_log"], "--", lw=1.0, color="0.45",
@@ -1055,8 +1076,8 @@ def plot_virial_ratio(res, figpath):
     Ek = res["ek_log"]
     Eg = res["eg_log"]
     q_ret = -2.0 * Ek / Eg
-    # Add each escaper's recorded energy to recover the assignment's second
-    # virial curve. Each event stores (t, n, Ek_esc, Eg_esc).
+    # Restore each escaper's recorded energy for the assignment's second virial
+    # curve. Each event stores (t, n, Ek_esc, Eg_esc).
     ek_esc_cum = np.zeros(len(t))
     eg_esc_cum = np.zeros(len(t))
     cum_ek = 0.0
@@ -1092,8 +1113,8 @@ def plot_density_profiles(results, figpath):
         V = res["V"]
         rc, rho, rerr = density_profile(res["pos_final"], res["m"])
         popt = res["king_popt"]
-        # A shell holding one or two particles has rerr comparable to rho, and
-        # the lower whisker would then run off the bottom of a log axis.
+        # In one- or two-particle shells, rerr is comparable to rho. Cap the
+        # lower whisker so it remains on the logarithmic axis.
         lower = np.minimum(rerr, 0.9 * rho)
         ax.errorbar(rc, rho, yerr=[lower, rerr], fmt="o", ms=3.5,
                     color=colors[V], elinewidth=0.9, capsize=1.5,
@@ -1114,10 +1135,9 @@ def plot_density_profiles(results, figpath):
 
 
 def save_run_npz(res, path):
-    """Save one run's states, diagnostics, escapers, and snapshots.
+    """Save one run's state, diagnostics, escapers, and snapshots.
 
-    Snapshot arrays use numbered keys because particle removal gives them
-    different lengths.
+    Numbered snapshot keys allow arrays of different lengths after removal.
     """
     times = sorted(t for t, v in res["snaps"].items() if v is not None)
     extra = {}
@@ -1135,7 +1155,7 @@ def save_run_npz(res, path):
 
 
 def load_run_npz(V, tag=""):
-    """Rebuild the dict the plotting functions expect from a saved run."""
+    """Load a saved run in the form expected by the plotting functions."""
     path = os.path.join(FIG_DIR, f"run_V{int(V)}{tag}.npz")
     if not os.path.exists(path):
         raise SystemExit(f"missing {path}; run the production simulation first")
@@ -1154,7 +1174,7 @@ def load_run_npz(V, tag=""):
 
 
 def write_king_table(results, path):
-    """Write booktabs tabular of fit params to a .tex snippet."""
+    """Write fitted King parameters as a booktabs table fragment."""
     with open(path, "w") as f:
         f.write("\\begin{tabular}{lcccc}\n\\toprule\n")
         f.write("V [km/s] & $\\rho_c$ [M$_\\odot$/kpc$^3$] & "
@@ -1268,6 +1288,21 @@ def run_tests():
         assert abs(snap_pos[0] - snap_t) < 1e-12
     print("Test snapshot timing: labelled times match integrated states")
 
+    # Numerical breakpoints must not depend on whether their states are saved.
+    break_times = (0.0, 0.03, 0.07, 0.1)
+    hidden = run_one(80.0, N=8, t_end=0.1, tol=1e-6,
+                     snapshot_times=[], break_times=break_times, verbose=False,
+                     h_min=1e-5, h_max=0.02)
+    saved = run_one(80.0, N=8, t_end=0.1, tol=1e-6,
+                    snapshot_times=break_times, break_times=break_times,
+                    verbose=False, h_min=1e-5, h_max=0.02)
+    assert not hidden["snaps"]
+    assert all(any(abs(t - st) < 1e-12 for t in hidden["t_log"])
+               for st in break_times)
+    assert np.array_equal(hidden["t_log"], saved["t_log"])
+    assert np.array_equal(hidden["pos_final"], saved["pos_final"])
+    print("Test integration breakpoints: storage policy does not change dynamics")
+
     # An unequal-mass circular binary checks the full integrator. G=1 keeps the
     # test scale simple.
     print("Test softened two-body orbit (unequal masses, tight tol)...")
@@ -1345,22 +1380,18 @@ def convergence_study(tols=(133.2, 13.32, 1.332, 0.1332),
 
 def theta_accuracy_table(thetas=(2.0, 1.5, 1.0, 0.8, 0.6, 0.4), N=3000,
                          seed=11, path=None):
-    """Tree acceleration error against the direct sum, versus opening angle.
+    """Compare tree acceleration with the direct sum across opening angles.
 
-    The brief opens a cell on D/L with L the main diagonal, while most
-    descriptions of Barnes-Hut test l/D with l the side.  Accepting the
-    multipole means
+    The brief uses D/L with the main diagonal L. Most Barnes-Hut descriptions
+    use l/D with side length l. Accepting the multipole means
 
         D/L >= theta      <=>      l/D <= 1/(sqrt(3) theta),
 
-    so a value quoted in the other convention is theta_std = 1/(sqrt(3) theta).
-    Both are tabulated to make comparison with other codes possible.
+    so theta_std = 1/(sqrt(3) theta) in the other convention. The table reports
+    both values for comparison.
     """
     rng = np.random.default_rng(seed)
-    u = rng.random(N)
-    r = R_SPHERE * u ** (1.0 / 3.0)
-    pos = r[:, None] * rand_dir(N, rng)
-    m = np.full(N, M_TOT / N)
+    pos, m = _sample_uniform_sphere(N, rng)
     a_dir = compute_direct_acc(pos, m, S=S_SOFT)
     norm = np.linalg.norm(a_dir)
     rows = []
@@ -1383,7 +1414,7 @@ def theta_accuracy_table(thetas=(2.0, 1.5, 1.0, 0.8, 0.6, 0.4), N=3000,
 
 # Rebuild report products from saved states
 def cmd_redraw(tag=""):
-    """Figures (a), (b), (c) from the saved V=80 run."""
+    """Rebuild figures (a), (b), and (c) from the saved V=80 run."""
     res = load_run_npz(80.0, tag)
     if not res["snaps"]:
         raise SystemExit(f"run_V80{tag}.npz predates snapshot saving; "
@@ -1466,7 +1497,7 @@ def cmd_tolerance_figure():
 
 
 def cmd_rerun_v80(tol, tag=""):
-    """Repeat V=80 and rewrite its state and figures (a), (b), and (c)."""
+    """Rerun V=80 and replace its state and figures (a), (b), and (c)."""
     res = run_one(80.0, N=N_MAIN, tol=tol,
                   snapshot_times=[0.0, 2.5, 5.0, 10.0, 15.0, T_END])
     save_run_npz(res, os.path.join(FIG_DIR, f"run_V80{tag}.npz"))
@@ -1526,9 +1557,8 @@ def main():
     quick = "--quick" in args
     N = 500 if quick else N_MAIN
     if quick and not tag:
-        # A quick run writes the same file names as a production run, so
-        # without this it would overwrite the 5000-particle states and every
-        # figure derived from them with N=500 output, silently.
+        # Use a separate tag so an N=500 quick run cannot overwrite production
+        # states or their figures.
         tag = "_quick"
         print("--quick: writing with tag '_quick' so production files survive")
     tol = TOL_RK
@@ -1549,7 +1579,8 @@ def main():
     fix_ab = None
     for i, V in enumerate(V_LIST):
         requested_snaps = snap_times if V == 80.0 else []
-        res = run_one(V, N=N, tol=tol, snapshot_times=requested_snaps)
+        res = run_one(V, N=N, tol=tol, snapshot_times=requested_snaps,
+                      break_times=snap_times)
         rc, rho, rerr = density_profile(res["pos_final"], res["m"])
         if i == 0:
             popt, perr = fit_king(rc, rho, rerr, fix_alpha_beta=None)

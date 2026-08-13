@@ -9,6 +9,7 @@ Run:
     python3 build_notebook.py --preserve-outputs  # documentation-only rebuild
 """
 import base64
+import ast
 import inspect
 import json
 import os
@@ -271,9 +272,10 @@ displacement error of any mass point,
 $$\mathrm{err} = \max_i \lVert \mathbf{r}_{i,\text{half}} - \mathbf{r}_{i,\text{full}} \rVert.$$
 
 The controller accepts a step when $\mathrm{err} \leq \mathrm{tol}$, then uses
-Richardson extrapolation to remove the leading error term. Each accepted step costs
-twelve force evaluations, and every one of them rebuilds the tree, because the
-stage positions differ.
+Richardson extrapolation to remove the leading error term. The full step and first
+half step reuse their identical first stage, so each proposal costs eleven force
+evaluations. Every remaining evaluation rebuilds the tree because its stage
+positions differ.
 """)
 
 code(r"""show(nb.rk_step)""")
@@ -680,9 +682,10 @@ density decreases with initial speed.
 The assigned tolerance permits a 133.2 kpc step error, larger than the initial
 cluster radius, and produces final energy shifts of 9 to 35 percent. Reducing
 the tolerance by $10^3$ keeps the shifts below 0.5 percent. For the saved
-$V=80$ runs, this changes the accepted-step count from 28 to 310 and the runtime
-from about 33 to 366 seconds. The report presents the tighter results and retains
-all assigned-tolerance outputs for comparison.
+$V=80$ runs, this changes the accepted-step count from 28 to 310; wall time is
+machine- and load-dependent and is recorded in the generated summaries. The
+report presents the tighter results and retains all assigned-tolerance outputs
+for comparison.
 """)
 
 out = os.path.join(os.path.dirname(os.path.abspath(__file__)),
@@ -704,20 +707,41 @@ if "--preserve-outputs" in sys.argv and os.path.exists(out):
     # Source-display outputs must follow the imported solver. Numerical outputs
     # remain valid after documentation-only edits.
     import nbody_solver as solver
-    density_source = "\n\n".join(inspect.getsource(obj) for obj in
-                                  (solver.density_profile, solver.king_model))
-    density_cell_source = 'show(nb.density_profile, nb.king_model)'
+
+    def source_display_objects(source):
+        """Return solver objects from a cell containing only show(nb.*)."""
+        try:
+            tree = ast.parse(source)
+        except SyntaxError:
+            return None
+        if len(tree.body) != 1 or not isinstance(tree.body[0], ast.Expr):
+            return None
+        call = tree.body[0].value
+        if not (isinstance(call, ast.Call) and isinstance(call.func, ast.Name)
+                and call.func.id == "show" and not call.keywords):
+            return None
+        names = []
+        for arg in call.args:
+            if not (isinstance(arg, ast.Attribute) and
+                    isinstance(arg.value, ast.Name) and arg.value.id == "nb"):
+                return None
+            names.append(arg.attr)
+        return [getattr(solver, name) for name in names]
+
     for cell in cells:
-        if "".join(cell.get("source", [])).strip() == density_cell_source:
-            cell["outputs"] = [{
-                "data": {
-                    "text/markdown": ("```python\n" + density_source +
-                                      "\n```").splitlines(keepends=True),
-                    "text/plain": ["<IPython.core.display.Markdown object>"]
-                },
-                "metadata": {},
-                "output_type": "display_data"
-            }]
+        objects = source_display_objects("".join(cell.get("source", [])).strip())
+        if objects is None:
+            continue
+        displayed_source = "\n\n".join(inspect.getsource(obj) for obj in objects)
+        cell["outputs"] = [{
+            "data": {
+                "text/markdown": ("```python\n" + displayed_source +
+                                  "\n```").splitlines(keepends=True),
+                "text/plain": ["<IPython.core.display.Markdown object>"]
+            },
+            "metadata": {},
+            "output_type": "display_data"
+        }]
 
     # Fit outputs come from saved states; this repeats no dynamics.
     import io
