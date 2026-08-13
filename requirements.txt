@@ -1,0 +1,8 @@
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+numba>=0.57
+ipython>=8.0
+jupyter>=1.0
+nbformat>=5.7
+nbconvert>=7.0
