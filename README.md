@@ -8,21 +8,17 @@ Eran Rehani
 
 | File | What it is |
 |---|---|
-| `report.pdf` | The 15-page report, including the method, checks, results, numerical difficulties, conclusion, and assigned-tolerance appendix. |
-| `Final_project.ipynb` | Runnable companion to the report, with saved outputs. It imports `nbody_solver` and displays selected routines from the imported module. |
-| `nbody_solver.py` | The main simulation source. Initial conditions, octree, both tree walks, the direct O(N²) reference, adaptive RK4, energy diagnostics, density profile, King fit, every figure, and the self-tests. |
-| `build_notebook.py` | Regenerates `Final_project.ipynb`. A normal rebuild leaves code outputs empty; `--preserve-outputs` retains executed outputs after documentation-only changes and refreshes the fitted outputs. |
-| `requirements.txt` | Python packages needed to run the solver and execute the notebook. |
+| `report.pdf` | The 19-page report, including the method, checks, results, numerical difficulties, conclusion, and assigned-tolerance appendix. |
+| `nbody_solver.py` | The main simulation source. Initial conditions, octree, both tree walks, the direct O(N²) reference, adaptive RK4, energy checks, density profile, King fit, every figure, and the self-tests. |
+| `requirements.txt` | Python packages needed to run the solver. |
 | `figures/` | Saved output of the production runs: states, energy histories and escaper records for all six runs (`run_V*.npz`), V=80 snapshots for figures (a) to (c), plus every figure and table in the report. |
 
-The report is the primary document. The notebook provides executable checks and
-the same production results.
+The report is the primary document and `nbody_solver.py` produces everything in it.
 
 Install with `python3 -m pip install -r requirements.txt`. The solver requires
 `numpy`, `scipy` and `matplotlib`. `numba` is optional at runtime. It compiles
-the tree walk and is roughly twenty times faster; the pure-Python walk
-performs the same calculation without it. Jupyter/IPython packages are needed
-only to execute the notebook.
+the tree walk and is roughly twenty times faster. The pure-Python walk performs
+the same calculation without it.
 
 ## Running
 
@@ -63,8 +59,8 @@ python3 nbody_solver.py --quick                   # fast sanity run at N = 500, 
 The random seed is fixed, so these reproduce the supplied numerical states and
 the numbers quoted in the report. Runtime fields and compressed `.npz` bytes can
 vary with hardware and library versions. `--quick` writes with the tag `_quick`
-to avoid overwriting the production states; inspect its output
-with `--redraw --tag=quick` and `--refit --tag=quick`.
+to avoid overwriting the production states. Inspect its output with
+`--redraw --tag=quick` and `--refit --tag=quick`.
 
 ## Integration tolerance
 
