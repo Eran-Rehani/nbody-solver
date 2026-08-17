@@ -39,17 +39,20 @@ These commands read `figures/*.npz`, repeat no dynamics, and take seconds:
 ```bash
 python3 nbody_solver.py --redraw          # figures (a), (b), (c)  [Figs. 3-5]
 python3 nbody_solver.py --refit           # figure (d) + King table [Fig. 6, Table 4]
+python3 nbody_solver.py --virial          # -2Ek/Eg and softened 2Ek/|W| at t_end
 python3 nbody_solver.py --tolerance-fig   # tolerance comparison    [Fig. 2]
 ```
 
-Add `--tag=eps01` to any of these to rebuild the Appendix A versions, e.g.
-`python3 nbody_solver.py --refit --tag=eps01`. `--refit` prints the fitted King
-parameters as it runs, so its output can be checked directly against Table 4.
+Add `--tag=eps01` to `--redraw`, `--refit` or `--virial` to rebuild the
+Appendix A versions, e.g. `python3 nbody_solver.py --refit --tag=eps01`.
+`--tolerance-fig` takes no tag, because that figure is itself the comparison
+between the two tolerances. `--refit` prints the fitted King parameters as it
+runs, so its output can be checked directly against Table 4.
 
 ### Reproducing from scratch
 
 ```bash
-python3 nbody_solver.py --tol=0.1332              # Section 5 (a few minutes per velocity)
+python3 nbody_solver.py --tol=0.1332              # Section 5 (10 to 16 min per velocity)
 python3 nbody_solver.py --tol=133.2 --tag=eps01   # Appendix A
 python3 nbody_solver.py --convergence             # Table 2
 python3 nbody_solver.py --theta-table             # Table 1
